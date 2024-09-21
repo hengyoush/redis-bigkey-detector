@@ -30,19 +30,50 @@ static __always_inline void get_client_fd(struct client_t* client, u32 *fd) {
 }
 SEC("uprobe//root/workspace/redis-6.2.13/src/redis-server:_addReplyToBufferOrList")
 int BPF_UPROBE(addReplyToBufferOrList) {
-	size_t len = (size_t)PT_REGS_PARM3(ctx);
-	u32 key = 0;
-	u64 sum = len;
-	u64* reply_bytes = bpf_map_lookup_elem(&reply_bytes_map, &key);
-	if (reply_bytes) {
-		sum += *reply_bytes;
-	}
-	if (sum ==213589) {
-	//bpf_printk("[addReplyToBufferOrList] sum is: %lld, %lld", sum, bpf_ktime_get_ns());
-	}
-	bpf_map_update_elem(&reply_bytes_map, &key, &sum, BPF_ANY);
+	// size_t len = (size_t)PT_REGS_PARM3(ctx);
+	// u32 key = 0;
+	// u64 sum = len;
+	// u64* reply_bytes = bpf_map_lookup_elem(&reply_bytes_map, &key);
+	// if (reply_bytes) {
+	// 	sum += *reply_bytes;
+	// }
+	// if (sum ==213589) {
+	// //bpf_printk("[addReplyToBufferOrList] sum is: %lld, %lld", sum, bpf_ktime_get_ns());
+	// }
+	// bpf_map_update_elem(&reply_bytes_map, &key, &sum, BPF_ANY);
 	return BPF_OK;
 }
+#define BUFPOS_OFFSET 760
+#define REPLY_OFFSET 176
+
+static __always_inline void fillPosData(struct client_data_pos* arg, struct client_t* client) {
+		int bufpos = 0;
+		bpf_probe_read_user(&bufpos, sizeof(bufpos), (void*)client + BUFPOS_OFFSET);
+		//bpf_printk("bufpos: %d\n", bufpos);
+		arg->buf_bos = bufpos;
+
+		// reply
+		struct list *reply;
+		bpf_probe_read_user(&reply, sizeof(reply), (void*)client + REPLY_OFFSET);
+		//bpf_printk("reply: %llx \n", reply);
+		unsigned long listlen = _U(reply, len);
+		struct listNode *tail = _U(reply, tail);
+		void *lastValue = _U(tail, value);
+		int curListIndex, listOffset;
+		if (listlen && lastValue) {
+			struct clientReplyBlock* block = (struct clientReplyBlock*)lastValue;
+			curListIndex =listlen - 1;
+			listOffset = _U(block, used);
+		} else {
+			curListIndex = 0;
+			listOffset = 0;
+		}
+		//bpf_printk("curListIndex: %d listOffset: %d \n", curListIndex, listOffset);
+		arg->client = client;
+		arg->list_idx = curListIndex;
+		arg->list_offset = listOffset;
+}
+
 
 SEC("uprobe//root/workspace/redis-6.2.13/src/redis-server:call")
 int BPF_UPROBE(callEntry) {
@@ -56,10 +87,12 @@ int BPF_UPROBE(callEntry) {
 	bpf_map_delete_elem(&reply_bytes_map, &key);
 
 	struct client_t* client = PT_REGS_PARM1(ctx);
+	struct client_data_pos arg = {0};
 	if (client) {
+		fillPosData(&arg, client);
 
 	//bpf_printk("111cleint: %x, id: %d\n", client, _U(client,id));
-	bpf_map_update_elem(&call_args_map, &key, &client, BPF_ANY);
+		bpf_map_update_elem(&call_args_map, &key, &arg, BPF_ANY);
 	}
 	return BPF_OK;
 }
@@ -68,35 +101,92 @@ int BPF_UPROBE(callEntry) {
 struct redisCommand {
 	char *declared_name;
 };
-# define MAX_BYTES 0
+// #define MAX_BYTES 1048576
+#define MAX_BYTES 0
 
+static __always_inline void listRewind(struct list *list, listIter *li) {
+    li->next = _U(list, head);
+    li->direction = AL_START_HEAD;
+}
+
+static __always_inline listNode *listNext(listIter *iter)
+{
+    listNode *current = iter->next;
+
+    if (current != NULL) {
+        if (iter->direction == AL_START_HEAD)
+            iter->next = _U(current,next);
+        else
+            iter->next = _U(current,prev);
+    }
+    return current;
+}
+#define MAX_LOOP_NUM 65
 SEC("uretprobe//root/workspace/redis-6.2.13/src/redis-server:call")
 int BPF_URETPROBE(callReturn) {
 	//bpf_printk("[callReturn] %lld",bpf_ktime_get_ns());
-	{
-		
-		u32 key = 0;
-		u64* reply_bytes = bpf_map_lookup_elem(&reply_bytes_map, &key);
-		if (reply_bytes) {
-			//bpf_printk("[callReturn] %lld %lld",*reply_bytes,bpf_ktime_get_ns());
-		}
-	}
 	int err = 0;
 
 	u32 key = 0;
-	struct client_t** p_client = bpf_map_lookup_elem(&call_args_map, &key);
-	if (!p_client) {
+	struct client_data_pos *arg = bpf_map_lookup_elem(&call_args_map, &key);
+	if (!arg) {
 		return BPF_OK;
 	}
-	struct client_t* client = *p_client;
+	struct client_t* client = arg->client;
 	//bpf_printk("cleint: %x, id: %d\n", client, _U(client,id));
-	u64 *p_bytes = bpf_map_lookup_elem(&reply_bytes_map, &key);
-	if (!p_bytes) {
-		return BPF_OK;
-	}
-	u64 bytes = *p_bytes;
-	if (bytes > MAX_BYTES) {
+	u64 bytes = 0;
 
+	struct client_data_pos after = {0};
+	fillPosData(&after, client);
+	int afterPos = after.buf_bos;
+	int afterListIndex = after.list_idx;
+	int afterListOffset = after.list_offset;
+	bytes += afterPos - arg->buf_bos;
+	// if (afterListIndex - arg->list_idx > MAX_LOOP_NUM) {
+	// 	bytes += MAX_BYTES + 1;
+	// } else 
+	if (afterListIndex > arg->list_idx || afterListOffset > arg->list_offset) {
+		int loops = 0;
+        int i = 0;
+        listIter iter;
+        listNode *curr;
+        clientReplyBlock *o;
+		struct list *reply;
+		bpf_probe_read_user(&reply, sizeof(reply), (void*)client + REPLY_OFFSET);
+        listRewind(reply, &iter);
+
+		for (;loops <= 65 && (curr = listNext(&iter)) != NULL; loops++) {
+			// if (bytes > MAX_BYTES) {
+			// 	break;
+			// }
+			size_t written;
+			if (i <arg->list_idx) {
+                i++;
+                continue;
+            }
+            o = _U(curr, value);
+			size_t used = _U(o,used);
+            if (used == 0) {
+                i++;
+                continue;
+            }
+			 if (i == arg->list_idx) {
+                /* Write the potentially incomplete node, which had data from
+                 * before the current command started */
+                written = used - arg->list_offset;
+            } else {
+                /* New node */
+                written =used;
+            }
+            bytes += written;
+            i++;
+		}
+	}
+	//bpf_printk("bytes: %d \n", bytes);
+
+
+
+	if (bytes > MAX_BYTES) {
 		int zero = 0;
 		struct bigkey_log* evt = bpf_map_lookup_elem(&bigkey_log_stack_map, &zero);
 		if (!evt) {
@@ -104,6 +194,7 @@ int BPF_URETPROBE(callReturn) {
 		}
 		evt->arg_len = 0;
 		evt->fd = 0;
+		evt->bytes_len = bytes;
 		// record cmd name cmd args and client ip
 		// 1. client ip
 		u32 fd = 0;
