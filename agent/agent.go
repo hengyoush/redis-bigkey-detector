@@ -40,7 +40,6 @@ func SetupAgent() {
 		log.Println("Remove memlock:", err)
 	}
 	objs := &bpf.AgentObjects{}
-	// btfFile, err := btf.LoadSpec("/home/admin/3.10.0-957.21.3.el7.x86_64.btf")
 
 	if err != nil {
 		log.Fatal("load btf error:", err)
@@ -68,11 +67,6 @@ func SetupAgent() {
 	if err != nil {
 		log.Fatalln(err)
 	}
-	// link1, err := ex.Uprobe("_addReplyToBufferOrList", objs.AddReplyToBufferOrList, nil)
-	// if err != nil {
-	// 	log.Fatalln(err)
-	// }
-	// defer link1.Close()
 	link2, err := ex.Uprobe("call", objs.CallEntry, nil)
 	if err != nil {
 		log.Fatalln(err)
@@ -147,14 +141,9 @@ func handleEvent(record []byte) error {
 	}
 	entry := SlowLogEntry{}
 	entry.bytes = uint(event.BytesLen)
-	// log.Printf("record arglen: %d", event.ArgLen)
 	argsString := ""
 	for i := 0; i < int(event.ArgLen); i++ {
 		each := event.BigkeyArgs[i]
-		// fmt.Printf("each.Len: %v\n", each.Len)
-		// fmt.Printf("each.Type: %v\n", each.Type)
-		// fmt.Printf("each.Arg0: %v\n", each.Arg0)
-		// fmt.Printf("each.Encoding: %v\n", each.Encoding)
 
 		if each.Encoding == encoding_raw || each.Encoding == encoding_embstr {
 			argBytes := each.Arg0[0:each.Len]
@@ -182,8 +171,6 @@ func getRemoteIp(fd int) string {
 		return ""
 	}
 
-	// fmt.Printf("Socket ID: %s\n", socketID)
-
 	// 获取连接信息
 	_, _, remoteIP, remotePort, err := utils.GetConnectionInfo(socketID)
 	if err != nil {
@@ -191,8 +178,6 @@ func getRemoteIp(fd int) string {
 		return ""
 	}
 
-	// fmt.Printf("Local Address: %s:%d\n", localIP, localPort)
-	// fmt.Printf("Remote Address: %s:%d\n", remoteIP, remotePort)
 	return remoteIP + ":" + fmt.Sprintf("%d", remotePort)
 }
 
