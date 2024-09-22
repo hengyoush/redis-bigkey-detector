@@ -10,6 +10,8 @@
 
 #define _U(src, a, ...)		BPF_PROBE_READ_USER(src, a, ##__VA_ARGS__)
 #define sdsEncodedObject(objptr) (objptr->encoding == OBJ_ENCODING_RAW || objptr->encoding == OBJ_ENCODING_EMBSTR)
+#define AL_START_HEAD 0
+#define AL_START_TAIL 1
 #define MY_BPF_ARRAY_PERCPU(name, value_type) \
 struct {													\
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY); \
@@ -25,13 +27,6 @@ struct {
 	__uint(max_entries, 100);
 	__uint(map_flags, 0);
 } reply_bytes_map SEC(".maps");
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(key_size, sizeof(u32));
-	__uint(value_size, sizeof(void*));
-	__uint(max_entries, 100);
-	__uint(map_flags, 0);
-} call_args_map SEC(".maps");
 
 struct robj {
     unsigned type:4;
@@ -42,6 +37,7 @@ struct robj {
     int refcount;
     void *ptr;
 };
+
 struct client_t {
     uint64_t id;            /* Client incremental unique ID. */
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
@@ -60,6 +56,45 @@ struct client_t {
     int original_argc;      /* Num of arguments of original command if arguments were rewritten. */
     struct robj **original_argv;   /* Arguments of original command if arguments were rewritten. */
 };
+typedef struct listNode {
+    struct listNode *prev;
+    struct listNode *next;
+    void *value;
+} listNode;
+
+typedef struct listIter {
+    listNode *next;
+    int direction;
+} listIter;
+struct list {
+    listNode *head;
+    listNode *tail;
+    void *(*dup)(void *ptr);
+    void (*free)(void *ptr);
+    int (*match)(void *ptr, void *key);
+    unsigned long len;
+} ;
+typedef struct clientReplyBlock {
+    size_t size, used;
+    char buf[];
+} clientReplyBlock;
+
+#define listLength(l) ((l)->len)
+struct client_data_pos {
+    struct client_t *client;
+    int buf_bos;
+    int list_idx;
+    int list_offset;
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(key_size, sizeof(u32));
+	__uint(value_size, sizeof(struct client_data_pos));
+	__uint(max_entries, 100);
+	__uint(map_flags, 0);
+} call_args_map SEC(".maps");
+
+
 typedef enum {
     CONN_STATE_NONE = 0,
     CONN_STATE_CONNECTING,
@@ -197,6 +232,7 @@ struct bigkey_log {
     struct bigkey_arg bigkey_args[MAX_ARGS_LEN];
     u32 fd;
     int arg_len;
+    int bytes_len;
 };
 
 MY_BPF_ARRAY_PERCPU(bigkey_log_stack_map, struct bigkey_log)

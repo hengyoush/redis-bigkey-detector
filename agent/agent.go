@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"redis-bigkey/bpf"
+	"redis-bigkey/utils"
 	"syscall"
 	"time"
 
@@ -17,6 +18,12 @@ import (
 	"github.com/cilium/ebpf/perf"
 	"github.com/cilium/ebpf/rlimit"
 )
+
+type AgentOptions struct {
+	Pid int
+}
+
+var AgentOpts AgentOptions = AgentOptions{}
 
 func SetupAgent() {
 	stopper := make(chan os.Signal)
@@ -33,7 +40,6 @@ func SetupAgent() {
 		log.Println("Remove memlock:", err)
 	}
 	objs := &bpf.AgentObjects{}
-	// btfFile, err := btf.LoadSpec("/home/admin/3.10.0-957.21.3.el7.x86_64.btf")
 
 	if err != nil {
 		log.Fatal("load btf error:", err)
@@ -61,11 +67,6 @@ func SetupAgent() {
 	if err != nil {
 		log.Fatalln(err)
 	}
-	link1, err := ex.Uprobe("_addReplyToBufferOrList", objs.AddReplyToBufferOrList, nil)
-	if err != nil {
-		log.Fatalln(err)
-	}
-	defer link1.Close()
 	link2, err := ex.Uprobe("call", objs.CallEntry, nil)
 	if err != nil {
 		log.Fatalln(err)
@@ -121,28 +122,63 @@ const (
 	encoding_embstr = 8
 )
 
+type SlowLogEntry struct {
+	ip    string
+	bytes uint
+	args  string
+	// time  uint64
+}
+
+func (s *SlowLogEntry) String() string {
+	return fmt.Sprintf("ip: %s, args: %s, bytes: %d", s.ip, s.args, s.bytes)
+}
+
 func handleEvent(record []byte) error {
 	event := bpf.AgentBigkeyLog{}
 	err := binary.Read(bytes.NewBuffer(record), binary.LittleEndian, &event)
 	if err != nil {
 		return err
 	}
-	log.Printf("record arglen: %d", event.ArgLen)
+	entry := SlowLogEntry{}
+	entry.bytes = uint(event.BytesLen)
+	argsString := ""
 	for i := 0; i < int(event.ArgLen); i++ {
 		each := event.BigkeyArgs[i]
-		fmt.Printf("each.Len: %v\n", each.Len)
-		fmt.Printf("each.Type: %v\n", each.Type)
-		fmt.Printf("each.Arg0: %v\n", each.Arg0)
-		fmt.Printf("each.Encoding: %v\n", each.Encoding)
 
 		if each.Encoding == encoding_raw || each.Encoding == encoding_embstr {
 			argBytes := each.Arg0[0:each.Len]
 			argBytes = append(argBytes, 0)
 			argStr := Int8ToStr(argBytes)
-			fmt.Printf("argStr: %v\n", argStr)
+			argsString += argStr
+			argsString += " "
+		} else if each.Encoding == encoding_int {
+			argBytes := each.Arg0[0:8]
+			argsString += Int8ToStr(argBytes)
+			argsString += " "
 		}
 	}
+	entry.ip = getRemoteIp(int(event.Fd))
+	entry.args = argsString
+	log.Printf("%s", entry.String())
+
 	return nil
+}
+
+func getRemoteIp(fd int) string {
+	socketID, err := utils.GetSocketInfoByPidFd(AgentOpts.Pid, fd)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return ""
+	}
+
+	// 获取连接信息
+	_, _, remoteIP, remotePort, err := utils.GetConnectionInfo(socketID)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return ""
+	}
+
+	return remoteIP + ":" + fmt.Sprintf("%d", remotePort)
 }
 
 func Int8ToStr(arr []int8) string {

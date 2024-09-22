@@ -21,8 +21,9 @@ type AgentBigkeyLog struct {
 		_        [3]byte
 		Len      int32
 	}
-	Fd     uint32
-	ArgLen int32
+	Fd       uint32
+	ArgLen   int32
+	BytesLen int32
 }
 
 // LoadAgent returns the embedded CollectionSpec for Agent.
